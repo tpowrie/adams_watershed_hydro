@@ -4,7 +4,7 @@ format: html
 editor: visual
 ---
 
-# Adams River Modified Double Mass Curve
+# Adams River Watershed Modified Double Mass Curve
 
 A modified Double Mass Curve (mDMC) ....
 
@@ -24,6 +24,8 @@ watersheds_bc <- bcdc_query_geodata(gauged_watersheds_search[[1]]$id, crs = 3005
   collect()
 
 adams_gauged_catchment <- filter(watersheds_bc, SOURCE_NAME == "ADAMS RIVER")
+
+rm(watersheds_bc, gauged_watersheds_search)
 
 adams_catchment_wgs84 <- st_transform(adams_gauged_catchment, crs = "epsg:4326")
 ```
@@ -80,6 +82,8 @@ names(era_t2m_monthly) <- as.character(year_month)
 adams_t2m_rast <- mask(era_t2m_monthly, adams_catchment_wgs84)
 
 adams_t2m_rast <- adams_t2m_rast - 273.15
+
+rm(era_t2m_monthly)
 ```
 
 ## PET
@@ -138,6 +142,8 @@ for (i in 1:nlyr(daylength_rast)) {
     daylength_rast[[i]] <- ifel(!is.na(adams_t2m_rast[[i]]), month_mean, NA)
   }
 }
+
+rm(sun_times_df, sun_times, sun_coords)
 ```
 
 ### Hamon PET
@@ -156,6 +162,8 @@ pet_hamon <- daylength_rast * NA
 for (i in 1:nlyr(daylength_rast)) {
   pet_hamon[[i]] <- 0.1651 * daylength_rast[[i]] * vd_rast[[i]] * 1.3 * days_per_month[i]
 }
+
+rm(vs_rast, vd_rast)
 ```
 
 ## AET
@@ -211,7 +219,8 @@ era_ppt_monthly <- rast(ppt_monthly_rasters)
 adams_ppt_rast <- mask(era_ppt_monthly, adams_catchment_wgs84)
 
 adams_ppt_rast <- adams_ppt_rast * 100
-plot(adams_ppt_rast[[1]])
+
+rm(r, ppt_monthly_rasters, era_ppt_monthly, monthly_sum)
 ```
 
 ### Zhang's AET
@@ -221,9 +230,9 @@ install.packages("remotes")
 remotes::install_github("rpkgs/hydroTools")
 
 aet_budyko <- hydroTools::ET_budyko(pet_hergreaves, ppt_raster_array, par = 2, method = "Fu1981")
-aet_Zhang <- hydroTools::ET_budyko(pet_hamon, adams_ppt_rast, par = 2, method = "Zhang2001")
+aet_zhang <- hydroTools::ET_budyko(pet_hamon, adams_ppt_rast, par = 2, method = "Zhang2001")
 
-layer_dates <- as.Date(paste0(names(aet_Zhang), "-01"))
+layer_dates <- as.Date(paste0(names(aet_zhang), "-01"))
 
 hydro_years <- ifelse(format(layer_dates, "%m") >= "10",
                       as.numeric(format(layer_dates, "%Y")) + 1,  
@@ -231,9 +240,11 @@ hydro_years <- ifelse(format(layer_dates, "%m") >= "10",
 
 hydro_years <- as.factor(hydro_years)
 
-aet_hydro_sum <- tapp(aet_Zhang, index = hydro_years, fun = sum, na.rm = TRUE)
+aet_hydro_sum <- tapp(aet_zhang, index = hydro_years, fun = sum, na.rm = TRUE)
 
 aet_hydro_year <- global(aet_hydro_sum, fun = mean, na.rm = TRUE)
+
+rm(aet_hydro_sum, aet_zhang)
 ```
 
 ## Effective PPT
@@ -269,6 +280,8 @@ adams_ppt_hydro_sum <- tapp(adams_ppt_rast, index = hydro_years, fun = sum, na.r
 ppt_hydro_year <- global(adams_ppt_hydro_sum, fun = mean, na.rm = TRUE)
 
 adams_pae <- ppt_hydro_year - aet_hydro_year
+
+rm(adams_pae_hydro_sum, adams_ppt_hydro_sum)
 ```
 
 ## Annual discharge
@@ -284,25 +297,82 @@ adams_hydro_data <- hy_daily_flows("08LD001")
 adams_hydro_daily <- adams_hydro_data %>% 
   mutate(Discharge = (Value * 86400 * 1000)/3210000000) # 3,210,000,000 is the aea of the Adams watershed in m^2
 
-adams_hydro_years <- adams_hydro_daily %>%
+adams_qa <- adams_hydro_daily %>%
   mutate(
     hydro_year = ifelse(month(Date) >= 10, year(Date) + 1, year(Date))
   ) %>% 
   group_by(hydro_year) %>%
+  filter(hydro_year >= 1951) %>% 
   filter(!any(is.na(Discharge))) %>%  
   summarise(annual_discharge = sum(Discharge)) %>% 
   slice(1:(n() - 1))
+
+rm(adams_hydro_data, adams_hydro_daily)
+```
+
+## Checking Autocorrelation and stationarity
+
+```{r}
+library(forecast)
+library(trend)
+library(tseries)
+library(zoo)
+
+adams_pae_ts <- zoo(adams_pae$mean, adams_pae$hydro_year)
+
+adf.test(adams_pae_ts)
+kpss.test(adams_pae_ts)
+acf(adams_pae_ts)
+pacf(adams_pae_ts)
+
+# There is missing flow data for some hydro years, so we need to add rows for these years, with a value of 0, to complete the timeseries. 
+
+all_years <- seq(min(adams_qa$hydro_year), max(adams_qa$hydro_year))
+missing_years <- setdiff(all_years, unique(adams_qa$hydro_year))
+missing_years  # This will show any missing years
+
+missing_data <- data.frame(
+  hydro_year = missing_years,
+  annual_discharge = 0
+)
+
+adams_qa_complete <- bind_rows(adams_qa, missing_data)
+
+adams_qa_complete <- adams_qa_complete %>%
+  arrange(hydro_year)
+
+adams_qa_ts <- zoo(adams_qa_complete$annual_discharge, adams_qa_complete$hydro_year)
+
+adf.test(adams_qa_ts)
+kpss.test(adams_qa_ts)
+acf(adams_qa_ts)
+pacf(adams_qa_ts)
+
+# AR(1) effect detected, so need to apply prewhitening on discharge data
+
+sen_slope <- sens.slope(adams_qa$annual_discharge, conf.level = 0.95)
+sen_slope
+
+# The sen_slope is not significantly different from 0; therefore, the data does not need to be detrended before removing AR(1) effect.
+
+acf_result <- acf(adams_qa$annual_discharge, lag.max = 1, plot = FALSE)
+r1 <- acf_result$acf[2]
+
+# Apply Prewhitening: Remove AR(1) effect
+prewhitened_qa <- adams_qa$annual_discharge[-1] - r1 * adams_qa$annual_discharge[-length(adams_qa$annual_discharge)]
+
+acf(prewhitened_qa)
+
+prewhitened_qa <- data.frame(hydro_year = adams_qa$hydro_year[-1], 
+                                annual_discharge = prewhitened_qa)
 ```
 
 ## Filter Data
 
 ```{r}
-adams_hydro_years <- adams_hydro_years %>% 
-  filter(hydro_year >= 1951)
-
 adams_pae$hydro_year <- 1950:2025
 
-valid_years <- adams_hydro_years %>%
+valid_years <- prewhitened_qa %>%
   select(hydro_year) %>%
   distinct() %>%
   pull(hydro_year)
@@ -311,14 +381,22 @@ valid_years <- adams_hydro_years %>%
 adams_pae_filtered <- adams_pae %>%
   filter(hydro_year %in% valid_years)
 
-adams_mdmc_df <- bind_cols(adams_hydro_years, adams_pae_filtered) %>% 
+adams_mdmc_df <- bind_cols(prewhitened_qa, adams_pae_filtered) %>% 
   select(-4) %>% 
   rename(
     hydro_year = `hydro_year...1`,
     annual_ppt = 'mean'
   ) 
+```
 
+## Write Data
 
+```{r}
+st_write(prewhitened_qa, "C:/Users/taypo/Documents/adams_watershed_hydro/processed_data/pw_adams_qa.csv")
+
+st_write(adams_pae, "C:/Users/taypo/Documents/adams_watershed_hydro/processed_data/adams_pae.csv")
+
+st_write(adams_mdmc_df, "C:/Users/taypo/Documents/adams_watershed_hydro/processed_data/adams_mdmc_df.csv")
 ```
 
 ## mDMC Curve
@@ -328,13 +406,13 @@ library(ggplot2)
 
 mdmc_cumulative <- adams_mdmc_df %>%
   mutate(
-    Cumulative_PPT = cumsum(annual_ppt),  
-    Cumulative_Discharge = cumsum(annual_discharge)  
+    cum_pae = cumsum(annual_ppt),  
+    cum_qa = cumsum(annual_discharge)  
   )
 
-write.csv(mdmc_cumulative, "D:/adams_mDMC_2025/adams_mdmc_2025.csv")
+write.csv(mdmc_cumulative, "C:/Users/taypo/Documents/adams_watershed_hydro/processed_data/adams_mdmc_2025.csv")
 
-ggplot(mdmc_cumulative, aes(x = Cumulative_PPT, y = Cumulative_Discharge)) +
+ggplot(mdmc_cumulative, aes(x = cum_pae, y = cum_qa)) +
   geom_line() + 
   labs(
     title = "Modified Double Mass Curve",
@@ -345,72 +423,59 @@ ggplot(mdmc_cumulative, aes(x = Cumulative_PPT, y = Cumulative_Discharge)) +
 
 ## Stats
 
+### Pettitt's test
+
 ```{r}
-library(forecast)
-library(trend)
+mdmc_series <- zoo(mdmc_cumulative$cum_qa, mdmc_cumulative$cum_pae)
 
-mdmc_slope_groups <- mdmc_cumulative %>%
-  mutate(TimeStep = (hydro_year - 1951) %/% 5 + 1)
+mdmc_values <- coredata(mdmc_series)
 
-mdmc_slope_data <- mdmc_slope_groups %>%
-  group_by(TimeStep) %>%  
-  summarize(
-    StartYear = min(hydro_year),  
-    EndYear = max(hydro_year),    
-    Slope = coef(lm(Cumulative_Discharge ~ Cumulative_PPT))[2]  
-  )
+pettitt_result <- pettitt.test(mdmc_values)
+print(pettitt_result)
 
-print(mdmc_slope_data)
+break_index <- pettitt_result$estimate
+break_precip <- mdmc_cumulative$cum_pae[break_index]  
+break_discharge <- mdmc_cumulative$cum_qa[break_index]  
 
-mdmc_slope_data <- mdmc_slope_data %>% drop_na(Slope)
+ggplot(mdmc_cumulative, aes(x = cum_pae, y = cum_qa)) +
+  geom_line(color = "blue", size = 1.5) +  # Line for the mDMC curve
+  geom_point(aes(x = break_precip, 
+                 y = break_discharge), 
+             color = "red", size = 3) +  # Add the breakpoint point
+  labs(title = "Modified Double Mass Curve (mDMC) with Breakpoint",
+       x = "Pae", 
+       y = "Qa") +
+  theme_minimal()
+```
 
-ggplot(mdmc_slope_data, aes(x = StartYear, y = Slope)) +
-  geom_line() +
-  geom_point() +
-  labs(
-    title = "MDMC Slope Over 3-Year Intervals",
-    x = "Start Year of 3-Year Interval",
-    y = "MDMC Slope"
-  )
+### Cumsum
 
-ar1_model <- Arima(mdmc_slope_data$Slope, order = c(1, 0, 0))
-mdmc_slope_data$slope_prewhitened <- residuals(ar1_model)
+```{r}
+cusum_result <- dfcusum(final_series)
+print(cusum_result)
 
-# Check autocorrelation
-acf(mdmc_slope_data$slope_prewhitened, main = "ACF of Pre-Whitened MDMC Slope")
+# Extract detected change points
+change_points <- cusum_result$changePoints
+if (length(change_points) > 0) {
+  points(cum_precip[change_points], cum_discharge[change_points], col = "purple", pch = 19, cex = 1.5)
+  legend("topright", legend = "CUSUM Breakpoints", col = "purple", pch = 19)
+}
 
-# Perform the Pettitt test on the pre-whitened MDMC slope
-pettitt_test <- pettitt.test(mdmc_slope_data$slope_prewhitened)
-
-# View the test results
-print(pettitt_test)
-
-breakpoint <- pettitt_test$estimate
-
-reference_period <- mdmc_slope_data[1:breakpoint, ] 
-disturbance_period <- mdmc_slope_data[(breakpoint + 1):nrow(mdmc_slope_data), ]
-
-# Perform a non-parametric Mann-Whitney U test
-wilcox_test <- wilcox.test(
-  reference_period$slope_prewhitened,
-  disturbance_period$slope_prewhitened
-)
-print(wilcox_test)
 ```
 
 ## Linear Reg
 
 ```{r}
 undisturbed_reg <- mdmc_cumulative %>%
-  filter(hydro_year >= 1951 & hydro_year <= 1980)
+  filter(hydro_year >= 1951 & hydro_year <= 1985)
 
-lm_model <- lm(Cumulative_Discharge ~ Cumulative_PPT, data = undisturbed_reg)
+lm_model <- lm(cum_qa ~ cum_pae, data = undisturbed_reg)
 
 summary(lm_model)
 
 mdmc_cumulative$predicted_discharge <- predict(lm_model, newdata = mdmc_cumulative)
 
-ggplot(mdmc_cumulative, aes(x = Cumulative_PPT, y = Cumulative_Discharge)) +
+ggplot(mdmc_cumulative, aes(x = cum_pae, y = cum_qa)) +
   geom_point(alpha = 0.6) +  
   geom_line(
     aes(y = predicted_discharge),  
@@ -418,6 +483,9 @@ ggplot(mdmc_cumulative, aes(x = Cumulative_PPT, y = Cumulative_Discharge)) +
     linetype = "dashed",
     linewidth = 1.2  
   ) +
+  geom_point(aes(x = break_precip, 
+                 y = break_discharge), 
+             color = "blue", size = 3) +
   labs(
     title = "mDMC for Adams Watershed (1950 - 2023)",
     x = "Cumulative Effective Precipitation (mm)",
