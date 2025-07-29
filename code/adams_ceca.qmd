@@ -1,0 +1,1238 @@
+---
+title: "adams_ceca"
+format: html
+editor: visual
+---
+
+# Calculating CECA for Adams Watershed
+
+Cumulative Equivalent Clearcut Area (CECA) is a way to quantify forest disturbance within a watershed. It was initially utilized to predict changes to peak flow, but in this context, we are just utilizing it as a metric for forest disturbance...
+
+## Dependencies
+
+```{r}
+library(sf)
+library(terra)
+library(bcdata)
+library(bcmaps)
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(readr)
+library(gstat)
+library(lubridate)
+library(data.table)
+library(lwgeom)
+```
+
+## Data upload
+
+### Define the Adams Watershed (AW) area
+
+```{r}
+
+gauged_watersheds_search <- bcdc_search("hydrometric watershed") 
+View(gauged_watersheds_search)
+
+watersheds_bc <- bcdc_query_geodata(gauged_watersheds_search[[1]]$id, crs = 3005) %>% 
+  collect()
+
+adams_gauged_catchment <- filter(watersheds_bc, SOURCE_NAME == "ADAMS RIVER")
+
+adams_catchment_wgs84 <- st_transform(adams_gauged_catchment, crs = "epsg:4326")
+
+adams_gauged_dem <- cded_terra(adams_gauged_catchment)
+
+adams_dem_wgs84 <- project(adams_gauged_dem, "epsg:4326", method = 'bilinear')
+
+adams_gauged_dem <- mask(adams_dem_wgs84, vect(adams_catchment_wgs84))
+
+climateBC_dem <- aggregate(adams_gauged_dem, fact = 120, fun = mean)
+
+climateBC_dem[climateBC_dem == -9999] <- NA
+
+writeRaster(climateBC_dem, "D:/aw_ceca/aw_define/climateBC_dem.asc", overwrite = TRUE)
+
+writeRaster(adams_gauged_dem, "D:/aw_ceca/aw_define/aw_gauged_dem.tif", overwrite = TRUE)
+
+st_write(adams_gauged_catchment, "D:/aw_ceca/aw_define/aw_gauged_catchment.gpkg", "aw_albers")
+
+st_write(adams_catchment_wgs84, "D:/aw_ceca/aw_define/aw_gauged_catchment.gpkg", "aw_wgs84", append = TRUE)
+
+# elevation characteristics of the Adams Watershed
+aw_area <- st_area(adams_gauged_catchment)
+print(aw_area)
+print(global(adams_gauged_dem, fun = "mean", na.rm = TRUE))
+print(global(adams_gauged_dem, fun = "max", na.rm = TRUE))
+print(global(adams_gauged_dem, fun = "min", na.rm = TRUE))
+
+# elevation characteristics of the Upper Adams
+upper_adams <- st_read("D:/aw_ceca/aw_define/upper_adams.shp")
+upper_adams_area <- st_area(upper_adams)
+upper_adams <- project(vect(upper_adams), crs(adams_gauged_dem))
+upper_adams_dem <- mask(adams_dem_wgs84, upper_adams)
+print(global(upper_adams_dem, fun = "mean", na.rm = TRUE))
+print(global(upper_adams_dem, fun = "min", na.rm = TRUE))
+
+# elevation characteristics of the lower Adams
+lower_adams <- st_read("D:/aw_ceca/aw_define/lower_adams.shp")
+lower_adams_area <- st_area(lower_adams)
+lower_adams <- project(vect(lower_adams), crs(adams_gauged_dem))
+lower_adams_dem <- mask(adams_dem_wgs84, lower_adams)
+print(global(lower_adams_dem, fun = "mean", na.rm = TRUE))
+print(global(lower_adams_dem, fun = "max", na.rm = TRUE))
+
+rm(gauged_watersheds_search, watersheds_bc, adams_dem_wgs84, climateBC_dem)
+```
+
+### Define AW climate
+
+```{r}
+aw_mat <- climateNAr(
+  inputFile = "D:/aw_ceca/aw_define/climateBC_dem.asc",
+  periodList = "Normal_1991_2020.nrm",
+  varList = 'MAT',
+  outDir = "D:/aw_ceca/aw_define"
+)
+
+aw_mat_mean <- global(aw_mat, fun = "mean", na.rm = TRUE)
+
+aw_mwmt <- climateNAr(
+  inputFile = "D:/aw_ceca/aw_define/climateBC_dem.asc",
+  periodList = "Normal_1991_2020.nrm",
+  varList = 'MWMT',
+  outDir = "D:/aw_ceca/aw_define"
+)
+
+aw_mwmt_mean <- global(aw_mwmt, fun = "mean", na.rm = TRUE)
+
+aw_mcmt <- climateNAr(
+  inputFile = "D:/aw_ceca/aw_define/climateBC_dem.asc",
+  periodList = "Normal_1991_2020.nrm",
+  varList = 'MCMT',
+  outDir = "D:/aw_ceca/aw_define"
+)
+
+aw_mcmt_mean <- global(aw_mcmt, fun = "mean", na.rm = TRUE)
+
+aw_map <- climateNAr(
+  inputFile = "D:/aw_ceca/aw_define/climateBC_dem.asc",
+  periodList = "Normal_1991_2020.nrm",
+  varList = 'MAP',
+  outDir = "D:/aw_ceca/aw_define"
+)
+
+aw_map_mean <- global(aw_map, fun = "mean", na.rm = TRUE)
+
+aw_pas <- climateNAr(
+  inputFile = "D:/aw_ceca/aw_define/climateBC_dem.asc",
+  periodList = "Normal_1991_2020.nrm",
+  varList = 'PAS',
+  outDir = "D:/aw_ceca/aw_define"
+)
+
+aw_pas_mean <- global(aw_pas, fun = "mean", na.rm = TRUE)
+
+crs(aw_mat) <- "EPSG:4326"
+crs(aw_mwmt) <- "EPSG:4326"
+crs(aw_mcmt) <- "EPSG:4326"
+crs(aw_map) <- "EPSG:4326"
+crs(aw_pas) <- "EPSG:4326"
+
+upper_adams_mat <- aw_mat %>%
+  mask(upper_adams) %>%
+  global(fun = "mean", na.rm = TRUE)
+upper_adams_mwmt <- aw_mwmt %>%
+  mask(upper_adams) %>%
+  global(fun = "mean", na.rm = TRUE)
+upper_adams_mcmt <- aw_mcmt %>%
+  mask(upper_adams) %>%
+  global(fun = "mean", na.rm = TRUE)
+upper_adams_map <- aw_map %>%
+  mask(upper_adams) %>%
+  global(fun = "mean", na.rm = TRUE)
+upper_adams_pas <- aw_pas %>%
+  mask(upper_adams) %>%
+  global(fun = "mean", na.rm = TRUE)
+
+lower_adams_mat <- aw_mat %>%
+  mask(lower_adams) %>%
+  global(fun = "mean", na.rm = TRUE)
+lower_adams_mwmt <- aw_mwmt %>%
+  mask(lower_adams) %>%
+  global(fun = "mean", na.rm = TRUE)
+lower_adams_mcmt <- aw_mcmt %>%
+  mask(lower_adams) %>%
+  global(fun = "mean", na.rm = TRUE)
+lower_adams_map <- aw_map %>%
+  mask(lower_adams) %>%
+  global(fun = "mean", na.rm = TRUE)
+lower_adams_pas <- aw_pas %>%
+  mask(lower_adams) %>%
+  global(fun = "mean", na.rm = TRUE)
+
+```
+
+### AW VRI Polygons
+
+The Vegetated Resource Inventory (VRI) spatial dataset, published by the BC Ministry of Forests, Lands, Natural Resource Operations, and Rural Development, describes the location and characteristics of vegetation resources units, including species, ecosystem designations, natural disturbances, land uses, etc. VRI composite layer rank 1 poly historical data was downloaded from 2002 -2023 through the BC Data Catalogue (i.e., VRI - HISTORICAL Vegetation Resource Inventory (2002 - 2023)). 2024 data was retrieved from VRI - 2024 - Forest Vegetation Composite Rank 1 Layer (R1). VRI datasets from 2002 - 2005 did not have any disturbance or logging data, so were removed. The 2007 dataset did not have any year/date data for when disturbances occurred, so this year was also removed.
+
+Historical: <https://catalogue.data.gov.bc.ca/dataset/vri-historical-vegetation-resource-inventory-2002-2023->\
+\
+Current Year: <https://catalogue.data.gov.bc.ca/dataset/vri-2024-forest-vegetation-composite-rank-1-layer-r1->
+
+```{r}
+
+input_dir <- "D:/aw_ceca/vri_historical"
+  
+output_dir <- "D:/aw_ceca/adams_vri"
+
+gdb_files <- list.files(input_dir, pattern = "(?i)veg_comp_lyr_r1_poly_\\d{4}\\.gdb$", full.names = TRUE)
+
+for (gdb_path in gdb_files) {
+  
+  year <- str_extract(basename(gdb_path), "\\d{4}")
+  vri_layers <- st_layers(gdb_path)$name
+  first_layer <- vri_layers[1]
+  
+  adams_vri <- st_read(gdb_path, layer = first_layer,
+                       wkt_filter = st_as_text(st_geometry(adams_gauged_catchment)))
+  
+  output_file <- file.path(output_dir, paste0("aw_vri_", year, ".gpkg"))
+  st_write(adams_vri, output_file, append = FALSE)
+  
+  print(paste("Processed and saved:", output_file))
+}
+
+gpkg_files <- list.files(output_dir, pattern = "\\.gpkg$", full.names = TRUE)
+
+cols_to_keep <- c("FEATURE_ID", "LINE_7B_DISTURBANCE_HISTORY", "EARLIEST_NONLOGGING_DIST_TYPE", "EARLIEST_NONLOGGING_DIST_DATE")
+
+aw_vri_list <- lapply(gpkg_files, function(file) {
+  sf_obj <- st_read(file, quiet = TRUE)
+    existing_cols <- intersect(cols_to_keep, colnames(sf_obj))
+  sf_obj %>% select(all_of(existing_cols))
+})
+
+aw_vri <- do.call(rbind, aw_vri_list)
+
+aw_vri <- st_drop_geometry(aw_vri)
+
+write.csv(aw_vri, file.path(output_dir, "aw_vri.csv"))
+
+rm(cols_to_keep, first_layer, gdb_files, gdb_path, vri_layers, year, output_file, adams_vri, aw_vri_list)
+```
+
+## Wildfire disturbance
+
+### AW Burn
+
+```{r}
+input_dir <- "D:/aw_ceca/adams_vri"
+output_dir <- "D:/aw_ceca/aw_fire"
+
+# The 2006 dataset doesn't have any information in the EARLIEST_NONLOGGING_DIST_TYPE column, but had disturbance and year data in LINE_7B_DISTURBANCE_HISTORY, so we will tidy this dataset first before running the loop.
+
+aw_vri_2006 <- st_read("D:/aw_ceca/adams_vri/aw_vri_2006.gpkg")
+
+aw_vri_2006 <- aw_vri_2006 %>%
+  select(- EARLIEST_NONLOGGING_DIST_DATE, - EARLIEST_NONLOGGING_DIST_TYPE) %>% 
+  separate(LINE_7B_DISTURBANCE_HISTORY, into = c("EARLIEST_NONLOGGING_DIST_TYPE", "EARLIEST_NONLOGGING_DIST_DATE"), sep = "(?<=^[A-Za-z])")
+
+st_write(aw_vri_2006, "D:/aw_ceca/adams_vri/aw_vri_2006.gpkg", append = FALSE)
+
+gpkg_files <- list.files(input_dir, pattern = "aw_vri_\\d{4}\\.gpkg$", full.names = TRUE)
+
+for (gpkg_path in gpkg_files) {
+  
+  year <- str_extract(basename(gpkg_path), "\\d{4}")
+  adams_vri <- st_read(gpkg_path)
+  adams_vri <- st_intersection(adams_vri, adams_gauged_catchment) %>% 
+    mutate(EARLIEST_NONLOGGING_DIST_TYPE = str_trim(EARLIEST_NONLOGGING_DIST_TYPE))
+  vri_fire <- adams_vri %>% 
+    filter(EARLIEST_NONLOGGING_DIST_TYPE %in% c("NB", "B"))
+
+  if (nrow(vri_fire) > 0) {
+    output_file <- file.path(output_dir, paste0("aw_fire_", year, ".gpkg"))
+    st_write(vri_fire, output_file, append = FALSE)
+    print(paste("Processed and saved:", output_file))
+  } else {
+    print(paste("No matching data for year", year, "- skipping file."))
+  }
+}
+
+# Over the years, VRI polygons change slighlty and have different feature ID's for the same disturbance polygon. Furthermore, VRI also overwrites disturbance polygons with more recent disturbances that occur in the same area. There is no streamlined way to account for multiple disturbances in one area, so only the first disturbance that occured will be included in the CECA. This will result in a more conservative estimate. To do this, all VRI burn polygons are uploaded to QGIS for each VRI year. 2006 was the earliest VRI year with burn data; therefore, it was used as the base year. The difference between 2008 and 2006 was found and then the base polygons from 2006, as well as the remaining polygons from 2008 were merged to form a new base layer. This process was applied reiteratively for each successive year, resulting in a single non-overlapping dataset for polygons from 2006 - 2024. As the polygons for the same disturbance changed slightly throughout the years, the remaining partial polygons were removed before being merged. 
+
+rm(aw_vri_2006, vri_fire, gpkg_files, gpkg_path, year)
+```
+
+### VDYP7
+
+```{r}
+
+aw_fire <- st_read("D:/aw_ceca/aw_fire/aw_fire_comp.gpkg")
+
+aw_fire$FEATURE_ID <- as.integer(aw_fire$FEATURE_ID)
+
+# Extracting vdyp data just for wildfire in the adams watershed. Datasets 2018 and 2011 had unique formats, so were not able to be processed within the loops; however, after the filtering process in QGIS, these datasets did not contain any unique wildfire disturbance instances so were not included in the VDYP runs. The 2006, 2008, and 2013 datesets were either did not have VDYP files or were in a different format, so data was extracted directly from the VRI_rank_1_poly layers and formatted into VDYP input files. 
+
+input_dir <- "D:/aw_ceca/aw_vdyp"
+output_dir <- "D:/aw_ceca/aw_vdyp/vdyp_inputs"
+
+vdyp_files <- list.files(input_dir, pattern = "VEG_COMP_VDYP7_INPUT_POLY_AND_LAYER_\\d{4}\\.gdb$", full.names = TRUE)
+
+for (vdyp_path in vdyp_files) {
+  
+  year <- str_extract(basename(vdyp_path), "\\d{4}")
+  
+  if (year == "2018") {
+    next
+  }
+  
+  bc_vdyp_poly <- st_read(vdyp_path, layer = "VEG_COMP_VDYP7_INPUT_POLY")
+  
+  adams_vdyp_poly <- bc_vdyp_poly %>% 
+    filter(FEATURE_ID %in% aw_fire$FEATURE_ID)
+  
+  output_file <- file.path(output_dir, paste0("vdyp_poly_", year, ".csv"))
+  
+  st_write(adams_vdyp_poly, output_file, append = FALSE)
+  
+  print(paste("Processed and saved:", output_file))
+  
+  bc_vdyp_layer <- st_read(vdyp_path, layer = "VEG_COMP_VDYP7_INPUT_LAYER")
+  
+  adams_vdyp_layer <- bc_vdyp_layer %>% 
+    filter(FEATURE_ID %in% adams_vdyp_poly$FEATURE_ID)
+  
+  output_file <- file.path(output_dir, paste0("vdyp_layer_", year, ".csv"))
+  
+  st_write(adams_vdyp_layer, output_file, append = FALSE)
+  
+  print(paste("Processed and saved:", output_file))
+
+}
+
+rm(bc_vdyp_layer, bc_vdyp_poly)
+
+
+# For 2009:2014, excluding 2011 & 2013
+
+# VDYP Poly
+
+input_dir <- "D:/aw_ceca/aw_vdyp"
+output_dir <- "D:/aw_ceca/aw_vdyp/vdyp_inputs"
+
+vdyp_files <- list.files(input_dir, pattern = "VEG_COMP_VDYP_INPUT_\\d{4}\\.gdb$", full.names = TRUE)
+
+poly_target_cols <- c(
+  "FEATURE_ID", "MAP_ID", "POLYGON_NUMBER", "ORG_UNIT", "TSA_NUMBER", "TFL_NAME",
+  "INVENTORY_STANDARD_CODE", "TSA_NUMBER", "SHRUB_HEIGHT", "SHRUB_CROWN_CLOSURE", 
+  "SHRUB_COVER_PATTERN", "HERB_COVER_TYPE_CODE", "HERB_COVER_PCT", "HERB_COVER_PATTERN_CODE", 
+  "BRYOID_COVER_PCT", "BEC_ZONE_CODE", "PRE_DISTURBANCE_STOCKABILITY", "YIELD_FACTOR", 
+  "NON_PRODUCTIVE_DESCRIPTOR_CD", "BCLCS_LEVEL1_CODE", "BCLCS_LEVEL2_CODE", "BCLCS_LEVEL3_CODE", 
+  "BCLCS_LEVEL4_CODE", "BCLCS_LEVEL5_CODE", "PHOTO_ESTIMATION_BASE_YEAR", "REFERENCE_YEAR", 
+  "PCT_DEAD", "NON_VEG_COVER_TYPE_1", "NON_VEG_COVER_PCT_1", "NON_VEG_COVER_PATTERN_1",
+  "NON_VEG_COVER_TYPE_2", "NON_VEG_COVER_PCT_2", "NON_VEG_COVER_PATTERN_2",
+  "NON_VEG_COVER_TYPE_3", "NON_VEG_COVER_PCT_3", "NON_VEG_COVER_PATTERN_3",
+  "LAND_COVER_CLASS_CD_1", "LAND_COVER_PCT_1", "LAND_COVER_CLASS_CD_2", "LAND_COVER_PCT_2", 
+  "LAND_COVER_CLASS_CD_3", "LAND_COVER_PCT_3", "ENTRY_TIMESTAMP", "ENTRY_USERID", 
+  "UPDATE_TIMESTAMP", "UPDATE_USERID", "OBJECT_ID"
+)
+
+col_rename_map <- c(
+  "HERB_COVER_TYPE_CODE"          = "HERB_COVER_TYPE",
+  "HERB_COVER_PATTERN_CODE"       = "HERB_COVER_PATTERN",
+  "BEC_ZONE_CODE"                 = "BEC_ZONE_CD",
+  "PRE_DISTURBANCE_STOCKABILITY"  = "STOCKABILITY",
+  "BCLCS_LEVEL1_CODE"             = "BCLCS_LEVEL_1",
+  "BCLCS_LEVEL2_CODE"             = "BCLCS_LEVEL_2",
+  "BCLCS_LEVEL3_CODE"             = "BCLCS_LEVEL_3",
+  "BCLCS_LEVEL4_CODE"             = "BCLCS_LEVEL_4",
+  "BCLCS_LEVEL5_CODE"             = "BCLCS_LEVEL_5",
+  "ORG_UNIT"                      = "ORG_UNIT_CODE",
+  "INVENTORY_STANDARD_CODE"       = "INVENTORY_STANDARD_CD",
+  "REFERENCE_YEAR"                = "REFERENCE_DATE",
+  "PHOTO_ESTIMATION_BASE_YEAR"    = "REFERENCE_DATE"
+)
+
+for (vdyp_path in vdyp_files) {
+  year <- str_extract(basename(vdyp_path), "\\d{4}") %>% as.integer()
+  
+  if (!(year %in% 2009:2014) || year %in% c(2011, 2013)) next
+  
+  message("Processing year: ", year)
+  
+  bc_vdyp <- st_read(vdyp_path, layer = "VEG_COMP_VDYP_INPUT", quiet = TRUE)
+  
+  adams_vdyp_poly <- bc_vdyp %>%
+    filter(FEATURE_ID %in% aw_fire$FEATURE_ID) %>%
+    rename(!!!col_rename_map) %>%
+    select(any_of(poly_target_cols))
+  
+  output_file <- file.path(output_dir, paste0("vdyp_poly_", year, ".csv"))
+  
+  write.csv(st_drop_geometry(adams_vdyp_poly), output_file)
+}
+
+# VDYP Layer
+
+layer_target_cols <- c(
+  "FEATURE_ID", "TREE_COVER_LAYER_ESTIMATED_ID", "MAP_ID", "POLYGON_NUMBER", "LAYER_LEVEL_CODE",
+  "VDYP7_LAYER_CD", "LAYER_STOCKABILITY", "FOREST_COVER_RANK_CODE", "NON_FOREST_DESCRIPTOR_CODE",
+  "EST_SITE_INDEX_SPECIES_CD", "ESTIMATED_SITE_INDEX", "CROWN_CLOSURE", "BASAL_AREA_75",
+  "STEMS_PER_HA_75", "SPECIES_CD_1", "SPECIES_PCT_1", "SPECIES_CD_2", "SPECIES_PCT_2",
+  "SPECIES_CD_3", "SPECIES_PCT_3", "SPECIES_CD_4", "SPECIES_PCT_4", "SPECIES_CD_5", "SPECIES_PCT_5",
+  "SPECIES_CD_6", "SPECIES_PCT_6", "EST_AGE_SPP1", "EST_HEIGHT_SPP1", "EST_AGE_SPP2", "EST_HEIGHT_SPP2",
+  "ADJ_IND", "LOREY_HEIGHT_75", "BASAL_AREA_125", "WS_VOL_PER_HA_75", "WS_VOL_PER_HA_125", 
+  "CU_VOL_PER_HA_125", "D_VOL_PER_HA_125", "DW_VOL_PER_HA_125", "ENTRY_TIMESTAMP", "ENTRY_USERID",
+  "UPDATE_TIMESTAMP", "UPDATE_USERID"
+)
+
+column_rename_map <- c(
+  "LAYER_LEVEL_CODE"              = "R1_LAYER_LEVEL_CD",  
+  "LAYER_STOCKABILITY"            = "STOCKABILITY",
+  "NON_FOREST_DESCRIPTOR_CODE"    = "R1_NON_FOREST_DESCRIPTOR", 
+  "EST_SITE_INDEX_SPECIES_CD"     = "R1_EST_SITE_INDEX_SPECIES_CD",
+  "ESTIMATED_SITE_INDEX"          = "R1_EST_SITE_INDEX",
+  "CROWN_CLOSURE"                 = "R1_CROWN_CLOSURE",
+  "BASAL_AREA_75"                 = "R1_BASAL_AREA_75",
+  "STEMS_PER_HA_75"               = "R1_VRI_LIVE_STEMS_PER_HA_75",
+  "SPECIES_CD_1"                  = "R1_SPECIES_CD_1",
+  "SPECIES_PCT_1"                 = "R1_SPECIES_PCT_1",
+  "SPECIES_CD_2"                  = "R1_SPECIES_CD_2",
+  "SPECIES_PCT_2"                 = "R1_SPECIES_PCT_2",
+  "SPECIES_CD_3"                  = "R1_SPECIES_CD_3",
+  "SPECIES_PCT_3"                 = "R1_SPECIES_PCT_3",
+  "SPECIES_CD_4"                  = "R1_SPECIES_CD_4",
+  "SPECIES_PCT_4"                 = "R1_SPECIES_PCT_4",
+  "SPECIES_CD_5"                  = "R1_SPECIES_CD_5",
+  "SPECIES_PCT_5"                 = "R1_SPECIES_PCT_5",
+  "SPECIES_CD_6"                  = "R1_SPECIES_CD_6",
+  "SPECIES_PCT_6"                 = "R1_SPECIES_PCT_6",
+  "EST_AGE_SPP1"                  = "R1_EST_AGE_SPP1",
+  "EST_HEIGHT_SPP1"               = "R1_EST_HEIGHT_SPP1",
+  "EST_AGE_SPP2"                  = "R1_EST_AGE_SPP2",
+  "EST_HEIGHT_SPP2"               = "R1_EST_HEIGHT_SPP2",
+  "ADJ_IND"                       = "R1_ADJ_INPUT_ID",
+  "LOREY_HEIGHT_75"               = "R1_LOREY_HEIGHT",
+  "BASAL_AREA_125"                = "R1_BASAL_AREA_125",
+  "WS_VOL_PER_HA_75"              = "R1_VOL_PER_HA_75",
+  "WS_VOL_PER_HA_125"             = "R1_VOL_PER_HA_125",
+  "CU_VOL_PER_HA_125"             = "R1_CLOSE_UTIL_VOL_125",
+  "D_VOL_PER_HA_125"              = "R1_CLOSE_UTIL_DECAY_VOL_125",
+  "DW_VOL_PER_HA_125"             = "R1_CLOSE_UTIL_WASTE_VOL_125"
+)
+
+for (vdyp_path in vdyp_files) {
+  year <- str_extract(basename(vdyp_path), "\\d{4}") %>% as.integer()
+  
+  if (!(year %in% 2009:2014) || year %in% c(2011, 2013)) next
+  
+  message("Processing year: ", year)
+  
+  bc_vdyp <- st_read(vdyp_path, layer = "VEG_COMP_VDYP_INPUT", quiet = TRUE)
+  
+  adams_vdyp_layer <- bc_vdyp %>%
+    filter(FEATURE_ID %in% aw_fire$FEATURE_ID) %>%
+    rename(!!!column_rename_map) %>%
+    select(any_of(layer_target_cols))  
+  
+  output_file <- file.path(output_dir, paste0("vdyp_layer_", year, ".csv"))
+  
+  write.csv(st_drop_geometry(adams_vdyp_layer), output_file)
+}
+
+# 2006, 2008 & 2013 
+vdyp_poly_06 <- st_read("D:/aw_ceca/aw_fire/aw_fire_2006.gpkg")
+vdyp_poly_08 <- st_read("D:/aw_ceca/aw_fire/aw_fire_2008.gpkg")
+vdyp_poly_13 <- st_read("D:/aw_ceca/aw_fire/aw_fire_2013.gpkg")
+
+col_rename_poly_vri <- c(
+  "POLYGON_NUMBER"                = "POLYGON_ID",
+  "HERB_COVER_TYPE_CODE"          = "HERB_COVER_TYPE",
+  "HERB_COVER_PATTERN_CODE"       = "HERB_COVER_PATTERN",
+  "BCLCS_LEVEL1_CODE"             = "BCLCS_LEVEL_1",
+  "BCLCS_LEVEL2_CODE"             = "BCLCS_LEVEL_2",
+  "BCLCS_LEVEL3_CODE"             = "BCLCS_LEVEL_3",
+  "BCLCS_LEVEL4_CODE"             = "BCLCS_LEVEL_4",
+  "BCLCS_LEVEL5_CODE"             = "BCLCS_LEVEL_5",
+  "ORG_UNIT"                      = "ORG_UNIT_CODE",
+  "INVENTORY_STANDARD_CODE"       = "INVENTORY_STANDARD_CD",
+  "PHOTO_ESTIMATION_BASE_YEAR"    = "REFERENCE_YEAR",
+  "LAND_COVER_PCT_1"              = "EST_COVERAGE_PCT_1",
+  "LAND_COVER_PCT_2"             = "EST_COVERAGE_PCT_2",
+  "LAND_COVER_PCT_3"              = "EST_COVERAGE_PCT_3"
+)
+
+vdyp_poly_2006 <- vdyp_poly_06 %>%
+  filter(FEATURE_ID %in% aw_fire$FEATURE_ID) %>%
+  rename(!!!col_rename_poly_vri) %>%
+  select(any_of(poly_target_cols)) %>%
+  st_drop_geometry()
+
+vdyp_poly_2008 <- vdyp_poly_08 %>%
+  filter(FEATURE_ID %in% aw_fire$FEATURE_ID) %>%
+  rename(!!!col_rename_poly_vri) %>%
+  select(any_of(poly_target_cols)) %>%
+  st_drop_geometry()
+
+vdyp_poly_2013 <- vdyp_poly_13 %>%
+  filter(FEATURE_ID %in% aw_fire$FEATURE_ID) %>%
+  rename(!!!col_rename_poly_vri) %>%
+  select(any_of(poly_target_cols)) %>%
+  st_drop_geometry()
+
+write.csv(vdyp_poly_2006, "D:/aw_ceca/aw_vdyp/vdyp_inputs/vdyp_poly_2006.csv", row.names = FALSE)
+write.csv(vdyp_poly_2008, "D:/aw_ceca/aw_vdyp/vdyp_inputs/vdyp_poly_2008.csv", row.names = FALSE)
+write.csv(vdyp_poly_2013, "D:/aw_ceca/aw_vdyp/vdyp_inputs/vdyp_poly_2013.csv", row.names = FALSE)
+
+# 2008 & 2013 layer
+
+col_rename_lyr_vri <- c(
+  "POLYGON_NUMBER"              = "POLYGON_ID",
+  "FOREST_COVER_RANK_CODE"      = "FOR_COVER_RANK_CD",
+  "NON_FOREST_DESCRIPTOR_CODE"  = "NON_FOREST_DESCRIPTOR",
+  "ESTIMATED_SITE_INDEX"        = "EST_SITE_INDEX",
+  "BASAL_AREA_75"               = "BASAL_AREA",
+  "STEMS_PER_HA_75"             = "VRI_LIVE_STEMS_PER_HA",
+  "EST_AGE_SPP1"                = "PROJ_AGE_1",
+  "EST_HEIGHT_SPP1"             = "PROJ_HEIGHT_1",
+  "EST_AGE_SPP2"                = "PROJ_AGE_2",
+  "EST_HEIGHT_SPP2"             = "PROJ_HEIGHT_2",
+  "ADJ_IND"                     = "ADJUSTED_IND"
+)
+
+vdyp_layer_2006 <- vdyp_poly_06 %>%
+  filter(FEATURE_ID %in% vdyp_poly_2006$FEATURE_ID) %>%
+  rename(!!!col_rename_lyr_vri) %>%
+  select(any_of(layer_target_cols)) %>%
+  st_drop_geometry()
+
+vdyp_layer_2008 <- vdyp_poly_08 %>%
+  filter(FEATURE_ID %in% vdyp_poly_2008$FEATURE_ID) %>%
+  rename(!!!col_rename_lyr_vri) %>%
+  select(any_of(layer_target_cols)) %>%
+  st_drop_geometry()
+
+vdyp_layer_2013 <- vdyp_poly_13 %>%
+  filter(FEATURE_ID %in% vdyp_poly_2013$FEATURE_ID) %>%
+  rename(!!!col_rename_lyr_vri) %>%
+  select(any_of(layer_target_cols)) %>%
+  st_drop_geometry()
+
+write.csv(vdyp_layer_2006, "D:/aw_ceca/aw_vdyp/vdyp_inputs/vdyp_layer_2006.csv", row.names = FALSE)
+write.csv(vdyp_layer_2008, "D:/aw_ceca/aw_vdyp/vdyp_inputs/vdyp_layer_2008.csv", row.names = FALSE)
+write.csv(vdyp_layer_2013, "D:/aw_ceca/aw_vdyp/vdyp_inputs/vdyp_layer_2013.csv", row.names = FALSE)
+
+# 2024
+
+vdyp_poly_2024 <- read.csv("D:/aw_ceca/aw_vdyp/VDYP7_INPUT_POLY_2024.csv")
+
+vdyp_poly_2024 <- vdyp_poly_2024 %>% 
+    filter(FEATURE_ID %in% aw_fire$FEATURE_ID)
+
+vdyp_layer_2024 <- read.csv("D:/aw_ceca/aw_vdyp/VDYP7_INPUT_LAYER_2024.csv")
+
+vdyp_layer_2024 <- vdyp_layer_2024 %>% 
+    filter(FEATURE_ID %in% vdyp_poly_2024$FEATURE_ID)
+
+write.csv(vdyp_poly_2024, "D:/aw_ceca/aw_vdyp/vdyp_inputs/vdyp_poly_2024.csv")
+
+write.csv(vdyp_layer_2024, "D:/aw_ceca/aw_vdyp/vdyp_inputs/vdyp_layer_2024.csv")
+```
+
+### VDYP7 Input Poly and Layer
+
+```{r}
+# Checking to make sure all columns are in the right format before merging
+
+vdyp_poly_format <- st_read("D:/aw_ceca/aw_vdyp/vdyp_input_poly_template.csv")
+cols_temp <- colnames(vdyp_poly_format)
+
+# Set directories
+input_dir <- "D:/aw_ceca/aw_vdyp/vdyp_inputs"
+output_dir <- "D:/aw_ceca/aw_vdyp/vdyp_inputs"
+
+# Files to process
+vdyp_files <- list.files(input_dir, pattern = "vdyp_poly_\\d{4}\\.csv$", full.names = TRUE)
+
+# Define special columns that should be filled with the first value
+special_fill_cols <- c("TSA_ME", "TFL_ME", "TSA_NUMBER", "CFS_ECOZONE")
+
+for (vdyp_path in vdyp_files) {
+  
+  year <- str_extract(basename(vdyp_path), "\\d{4}")
+  
+  vdyp_poly <- st_read(vdyp_path)
+  cols_vdyp <- colnames(vdyp_poly)
+  
+  # Keep only matching columns
+  vdyp_poly <- vdyp_poly[, intersect(cols_temp, cols_vdyp)]
+  
+  # Identify and handle missing columns
+  missing_cols <- setdiff(cols_temp, cols_vdyp)
+  if (length(missing_cols) > 0) {
+    cat("Missing columns in", basename(vdyp_path), ":\n")
+    print(missing_cols)
+    
+    for (col in missing_cols) {
+      if (col %in% special_fill_cols) {
+        vdyp_poly[[col]] <- vdyp_format[[col]][1]
+      } else {
+        vdyp_poly[[col]] <- NA
+      }
+    }
+  }
+  
+  # Reorder columns to match template
+  vdyp_poly <- vdyp_poly[, cols_temp]
+  
+  output_file <- file.path(output_dir, paste0("vdyp_poly_cln_", year, ".csv"))
+  st_write(vdyp_poly, output_file, append = FALSE)
+  
+  print(paste("Processed and saved:", output_file))
+}
+
+# vdyp layer format
+
+vdyp_layer_format <- st_read("D:/aw_ceca/aw_vdyp/vdyp_input_layer_template.csv")
+cols_temp <- colnames(vdyp_layer_format)
+
+vdyp_files <- list.files(input_dir, pattern = "vdyp_layer_\\d{4}\\.csv$", full.names = TRUE)
+
+for (vdyp_path in vdyp_files) {
+  
+  year <- str_extract(basename(vdyp_path), "\\d{4}")
+  
+  vdyp_layer <- st_read(vdyp_path)
+  cols_vdyp <- colnames(vdyp_layer)
+  
+  vdyp_layer <- vdyp_layer[, intersect(cols_temp, cols_vdyp)]
+  
+  missing_cols <- setdiff(cols_temp, cols_vdyp)
+  if (length(missing_cols) > 0) {
+    cat("Missing columns in", basename(vdyp_path), ":\n")
+    print(missing_cols)
+    
+    for (col in missing_cols) {
+      if (col %in% special_fill_cols) {
+        vdyp_layer[[col]] <- vdyp_format[[col]][1]
+      } else {
+        vdyp_layer[[col]] <- NA
+      }
+    }
+  }
+  
+  vdyp_layer <- vdyp_layer[, cols_temp]
+  
+  output_file <- file.path(output_dir, paste0("vdyp_layer_cln_", year, ".csv"))
+  st_write(vdyp_layer, output_file, append = FALSE)
+  
+  print(paste("Processed and saved:", output_file))
+}
+
+# combine data
+
+csv_dir <- "D:/aw_ceca/aw_vdyp/vdyp_inputs"
+
+poly_files <- list.files(csv_dir, pattern = "^vdyp_poly_cln_\\d{4}\\.csv$", full.names = TRUE)
+
+poly_df <- poly_files %>%
+  map(~ {
+    year <- str_extract(.x, "\\d{4}") 
+    read_csv(.x, col_types = cols(.default = col_character())) %>%
+      mutate(YEAR = as.numeric(year))
+  }) %>%
+  list_rbind()
+
+aw_vdyp_input_poly <- poly_df %>%
+  arrange(desc(YEAR)) %>% 
+  distinct(FEATURE_ID, .keep_all = TRUE)
+
+layer_files <- list.files(csv_dir, pattern = "^vdyp_layer_cln_\\d{4}\\.csv$", full.names = TRUE)
+
+layer_df <- layer_files %>%
+  map(~ {
+    year <- str_extract(.x, "\\d{4}") 
+    read_csv(.x, col_types = cols(.default = col_character())) %>%
+      mutate(YEAR = as.numeric(year))
+  }) %>%
+  list_rbind()
+
+aw_vdyp_input_layer <- layer_df %>%
+  arrange(desc(YEAR)) %>%
+  distinct(FEATURE_ID, .keep_all = TRUE)
+
+aw_vdyp_input_poly <- aw_vdyp_input_poly %>% 
+  filter(FEATURE_ID %in% aw_fire$FEATURE_ID)
+
+aw_vdyp_input_layer <- aw_vdyp_input_layer %>% 
+  filter(FEATURE_ID %in% aw_vdyp_input_poly$FEATURE_ID)
+
+write.csv(aw_vdyp_input_poly, "D:/aw_ceca/aw_vdyp/vdyp_inputs/aw_vdyp_input_poly.csv", na = "")
+write.csv(aw_vdyp_input_layer, "D:/aw_ceca/aw_vdyp/vdyp_inputs/aw_vdyp_input_layer.csv", na = "")
+
+# Before the VDYP run, some manual filtering was necessary. There were 2,241 instances that had a non-treed code indicating less than 10% of the area consisted of tree species of any size and fourteen had a non-productive descriptor code suggesting the area was rock. All these instances were removed. There were 52 instances from the 2006 VRI dataset without a disturbance date or without a matching input layer instance. Seven of these appeared to have logging occur in the same year and were processed with the forestry disturbance type, and the rest were removed from the dataset due to insufficient data.
+```
+
+## Forestry Disturbance
+
+### VRI Logging
+
+```{r}
+# For the 2006 data to be processed in the loop, the columns need to be reformatted first.
+aw_vri_2006 <- st_read("D:/aw_ceca/adams_vri/aw_vri_2006.gpkg")
+
+vri_logged_06 <- aw_vri_2006 %>%
+  filter(grepl("^L.*\\d{2,}", LINE_7B_DISTURBANCE_HISTORY))
+
+st_write(vri_logged_06, "D:/aw_ceca/aw_tipsy/adams_logged_2006.gpkg", append = FALSE)
+
+input_dir <- "D:/aw_ceca/adams_vri"
+output_dir <- "D:/aw_ceca/aw_tipsy"
+
+gpkg_files <- list.files(input_dir, pattern = "aw_vri_\\d{4}\\.gpkg$", full.names = TRUE)
+
+for (gpkg_path in gpkg_files) {
+  
+  year <- str_extract(basename(gpkg_path), "\\d{4}")
+  
+  vri_logging <- st_read(gpkg_path)
+  
+  vri_logged <- vri_logging %>%
+    filter(grepl("^L\\d{2}", LINE_7B_DISTURBANCE_HISTORY))
+  
+  output_file <- file.path(output_dir, paste0("adams_logged_", year, ".gpkg"))
+  
+  st_write(vri_logged, output_file, driver = "GPKG", append = FALSE)
+  
+}
+
+# Polygon delineations, as well as Feature_ID's, change over the years, so simply merging all the layers and removing duplicates by ID and geometry will not produce a clean dataset. To work around this, we will progressively accumulate data from each layer by 1. finding the difference between the 'accumulated' base year and the following year, 2. merging the 'accumulated' base year with the difference layer, 3. repeating these steps until there is a complete, clean dataset. All the 'parts' years are merged below.
+
+log_dir <- "D:/aw_ceca/aw_tipsy/log_qgis"
+
+log_files <- list.files(log_dir, pattern = "^log_parts_\\d{2}\\.shp$", full.names = TRUE)
+
+log_parts <- function(log_path) {
+  st_read(log_path, quiet = TRUE)
+}
+
+reference_df <- log_parts(log_files[1])
+reference_col_types <- sapply(reference_df, class)
+column_names <- names(reference_col_types)
+
+log_parts_standardized <- function(file) {
+  df <- log_parts(file)
+  
+  # Drop unwanted column(s)
+  df <- df[, !(colnames(df) %in% c("CFS_ECOZON", "CFS_ECOZONE"))]  # Handle both possible typos
+  
+  # Add any missing columns with NA
+  missing_cols <- setdiff(column_names, names(df))
+  for (col in missing_cols) {
+    df[[col]] <- NA
+  }
+
+  # Reorder to match reference
+  df <- df[, column_names, drop = FALSE]
+
+  # Coerce each column to match reference class
+  for (col in column_names) {
+    target_class <- reference_col_types[[col]]
+    
+    if ("numeric" %in% target_class) {
+      df[[col]] <- as.numeric(df[[col]])
+    } else if ("character" %in% target_class) {
+      df[[col]] <- as.character(df[[col]])
+    } else if ("integer" %in% target_class) {
+      df[[col]] <- as.integer(df[[col]])
+    } else if ("logical" %in% target_class) {
+      df[[col]] <- as.logical(df[[col]])
+    } else {
+      # Catch-all fallback to original class in reference
+      class(df[[col]]) <- target_class
+    }
+  }
+
+  return(df)
+}
+
+log_list <- lapply(log_files, log_parts_standardized)
+
+# Combine into a single sf object
+aw_log <- do.call(rbind, log_list)
+
+write.csv(st_drop_geometry(aw_log), "D:/aw_ceca/aw_tipsy/aw_log.csv")
+st_write(aw_log, "D:/aw_ceca/aw_tipsy/aw_log.gpkg", append = FALSE)
+                          
+aw_log <- aw_log %>% 
+  select(
+    Feat_ID = FEATURE_ID,
+    Mapsheet = MAP_ID,
+    Object_ID = POLYGON_ID,
+    BEC = BEC_ZONE_C,
+    BEC_subzon = BEC_SUBZON,
+    BEC_Varian = BEC_VARIAN,
+    BEC_phase = BEC_PHASE,
+    Year_est = HARVEST_DA,
+    Site_Index = SITE_INDEX,
+    Area = area,
+    Full_Label = FULL_LABEL,
+    Spcs_cd_1 = SPECIES_CD,
+    Spcs_pct_1 = SPECIES_PC,
+    Spcs_cd_2 = SPECIES__1,
+    Spcs_pct_2 = SPECIES__2,
+    Spcs_cd_3 = SPECIES__3,
+    Spcs_pct_3 = SPECIES__4,
+    Spcs_cd_4 = SPECIES__5,
+    Spcs_pct_4 = SPECIES__6,
+    Spcs_cd_5 = SPECIES__7,
+    Spcs_pct_5 = SPECIES__8,
+    Spcs_cd_6 = SPECIES__9,
+    Spcs_pct_6 = SPECIES_10,
+    SI_age_1 = PROJ_AGE_1,
+    SI_hght_1 = PROJ_HEIGH,
+    SI_age_2 = PROJ_AGE_2,
+    SI_hght_2 = PROJ_HEI_2,
+    stems_ha = VRI_LIVE_S
+  )
+
+aw_log$Year_est <- year(aw_log$Year_est)
+
+st_write(aw_log, "D:/aw_ceca/aw_tipsy/aw_log.shp", append = FALSE)
+```
+
+### Completing dataset
+
+Out of 10,769 (+894 ccb) logging polygons, 1,453 did not have sufficient data to model growth of stands in TIPSY; therefore, it was necessary to fill in this data with VRI overlay layers. The error layer, with the all polygons containing insufficient data, was exported to QGIS, where VRI overlays were loaded and a 'join attributes by location' function was performed. Because the polygons are different over the years, a one to one join type was utilized by the largest overlapping polygon. Data was first extracted from the 2024 layer, joined to the complete dataset, and then the same process was performed for the remaining error rows with each preceeding VRI year. ... when clipped to gauged catchment, 11668 unique instances
+
+```{r}
+RESULTS_search <- bcdc_search("RESULTS")
+RESULTS_search
+
+# Run time for this code chunk is lengthy. May be more efficient to download from BC Data Catalogue with a custom AOI.
+# consolidated_cutblocks <- bcdc_get_data(
+  # record = "b1b647a6-f271-42e0-9cd0-89ec24bce9f7",
+  # resource = "8d94426b-29e6-4634-988a-8de5c6a09e88"
+  # ) %>%
+  # st_intersection(adams_gauged_catchment)
+
+aw_ccb <- st_read("D:/aw_ceca/aw_tipsy/aw_ccb/VEG_CONSOLIDATED_CUT_BLOCKS_SP/CNS_CUT_BL_polygon.shp")
+
+aw_ccb <- st_intersection(aw_ccb, adams_gauged_catchment)
+
+# Need to write CSV with ccb information for later use.
+
+write.csv(st_drop_geometry(aw_ccb), "D:/aw_ceca/aw_tipsy/aw_ccb/aw_ccb.csv")
+
+aw_ccb <- aw_ccb %>% 
+  select(
+    feature_id = VCCB_SYSID,
+    area_sqm = AREA_SQM,
+    pct_cc = PRCNT_CLRT,
+    pct_pc = PRCNT_PRTT
+  )
+
+st_write(aw_ccb, "D:/aw_ceca/aw_tipsy/aw_ccb/aw_ccb.shp")
+
+######
+
+aw_log_err <- aw_log %>% 
+  filter(is.na(Spcs_cd_1))
+
+st_write(aw_log_err, "D:/aw_ceca/aw_tipsy/aw_log_err.shp", append = FALSE)
+
+log_update_23 <- st_read("D:/aw_ceca/aw_tipsy/log_qgis/log_update_23.shp")
+
+aw_log_update <- log_update_23 %>% 
+  select(
+    ccb_id = feature_id,
+    vri_id = Feat_ID,
+    Feature_ID = FEATURE__1,
+    Mapsheet = MAP_ID,
+    Object_ID = POLYGON_ID,
+    BEC = BEC_ZONE_C,
+    BEC_subzon = BEC_SUBZON,
+    BEC_Varian = BEC_VARIAN,
+    BEC_phase = BEC_PHASE,
+    Year_est = HARVEST_DA,
+    Site_Index = SITE_INDEX,
+    Full_Label = FULL_LABEL,
+    Spcs_cd_1 = SPECIES_CD,
+    Spcs_pct_1 = SPECIES_PC,
+    Spcs_cd_2 = SPECIES__1,
+    Spcs_pct_2 = SPECIES__2,
+    Spcs_cd_3 = SPECIES__3,
+    Spcs_pct_3 = SPECIES__4,
+    Spcs_cd_4 = SPECIES__5,
+    Spcs_pct_4 = SPECIES__6,
+    Spcs_cd_5 = SPECIES__7,
+    Spcs_pct_5 = SPECIES__8,
+    Spcs_cd_6 = SPECIES__9,
+    Spcs_pct_6 = SPECIES_10,
+    SI_age_1 = PROJ_AGE_1,
+    SI_hght_1 = PROJ_HEIGH,
+    SI_age_2 = PROJ_AGE_2,
+    SI_hght_2 = PROJ_HEI_2,
+    stems_ha = VRI_LIVE_S
+  )
+
+aw_log_clean <- aw_log %>%
+  filter(!is.na(Spcs_cd_1))
+
+aw_log_clean <- st_transform(aw_log_clean, crs = st_crs(aw_log_update))
+
+aw_log_update$Year_est <- as.character(aw_log_update$Year_est)
+aw_log_clean$Year_est <- as.character(aw_log_clean$Year_est)
+
+aw_tipsy <- bind_rows(aw_log_update, aw_log_clean)
+
+aw_log_err <- aw_tipsy %>% 
+  filter(is.na(Spcs_cd_1))
+
+st_write(aw_log_err, "D:/aw_ceca/aw_tipsy/aw_log_err.shp", append = FALSE)
+
+log_update_10 <- st_read("D:/aw_ceca/aw_tipsy/log_qgis/log_update_10.shp")
+
+aw_log_update <- log_update_10 %>% 
+  select(
+    ccb_id,
+    vri_id,
+    Feature_ID = FEATURE_ID,
+    Mapsheet = MAP_ID,
+    Object_ID = POLYGON_ID,
+    BEC = BEC_ZONE_C,
+    BEC_subzon = BEC_SUBZON,
+    BEC_Varian = BEC_VARIAN,
+    BEC_phase = BEC_PHASE_,
+    Year_est = HARVEST_DA,
+    Site_Index = SITE_INDEX,
+    Full_Label = FULL_LABEL,
+    Spcs_cd_1 = SPECIES_CD,
+    Spcs_pct_1 = SPECIES_PC,
+    Spcs_cd_2 = SPECIES__1,
+    Spcs_pct_2 = SPECIES__2,
+    Spcs_cd_3 = SPECIES__3,
+    Spcs_pct_3 = SPECIES__4,
+    Spcs_cd_4 = SPECIES__5,
+    Spcs_pct_4 = SPECIES__6,
+    Spcs_cd_5 = SPECIES__7,
+    Spcs_pct_5 = SPECIES__8,
+    Spcs_cd_6 = SPECIES__9,
+    Spcs_pct_6 = SPECIES_10,
+    SI_age_1 = PROJ_AGE_1,
+    SI_hght_1 = PROJ_HEIGH,
+    SI_age_2 = PROJ_AGE_2,
+    SI_hght_2 = PROJ_HEI_2,
+    stems_ha = VRI_LIVE_S
+  )
+
+aw_log_clean <- aw_tipsy %>%
+  filter(!is.na(Spcs_cd_1))
+
+aw_tipsy <- bind_rows(aw_log_update, aw_log_clean)
+
+aw_log_err <- aw_tipsy %>% 
+  filter(is.na(Spcs_cd_1))
+
+st_write(aw_log_err, "D:/aw_ceca/aw_tipsy/aw_log_err.shp", append = FALSE)
+
+aw_log_clean <- aw_tipsy %>%
+  filter(!is.na(Spcs_cd_1))
+
+st_write(aw_log_clean, "D:/aw_ceca/aw_tipsy/aw_tipsy.shp")
+
+##### Slope and area
+
+adams_slope <- terrain(adams_gauged_dem, v = "slope")
+
+aw_log_transformed <- st_transform(aw_log_clean, crs = st_crs(adams_slope))
+
+aw_log_vect <- vect(aw_log_transformed)
+
+aw_log_slopes <- terra::extract(adams_slope, aw_log_vect, fun = mean, bind = TRUE)
+
+aw_tipsy_comp <- st_as_sf(aw_log_slopes)
+
+aw_tipsy_comp <- st_make_valid(aw_tipsy_comp)
+
+aw_tipsy_comp$area_m2 <- st_area(aw_tipsy_comp)
+
+aw_tipsy_comp <- aw_tipsy_comp %>%
+  mutate(area_m2 = as.numeric(area_m2)) %>%
+  mutate(Area = if_else(is.na(Area), area_m2, Area)) %>% 
+  select(- area_m2)
+
+##### Site Index
+
+aw_interp_bnd <- st_buffer(adams_gauged_catchment, dist = 1000)
+aw_interp_bnd_84 <- st_transform(aw_interp_bnd, crs = "epsg:4326")
+
+aw_grid <- terra::rast(aw_interp_bnd_84, nrows = 100, ncols = 100)
+xy <- terra::xyFromCell(aw_grid, 1:ncell(aw_grid))
+
+aw_grid <- st_as_sf(as.data.frame(xy), coords = c("x", "y"),
+                 crs = st_crs(adams_catchment_wgs84))
+
+aw_grid <- st_filter(aw_grid, aw_interp_bnd_84)
+
+aw_si <- aw_tipsy_comp %>% 
+  select(Feat_ID, Site_Index, BEC)
+
+sum(is.na(aw_si$Site_Index))
+
+# 23 NA SI values
+
+## Nearest neighbor prediction
+
+aw_si_clean <- aw_si %>%
+  drop_na(Site_Index) %>% 
+  st_transform(aw_si, crs = "epsg:4326")
+
+si_bec_groups <- split(aw_si_clean, aw_si_clean$BEC)
+
+interpolated_results <- map(names(si_bec_groups), function(bec_zone) {
+  bec_points <- si_bec_groups[[bec_zone]]
+
+  # Ensure it's a valid sf object and skip if empty
+  if (!inherits(bec_points, "sf") || nrow(bec_points) == 0) return(NULL)
+
+  bec_points <- st_make_valid(bec_points) %>%
+    filter(!st_is_empty(st_geometry(.)))
+
+  if (nrow(bec_points) == 0) return(NULL)
+
+  # Get bounding box and filter aw_grid within that box
+  bec_bbox <- st_as_sfc(st_bbox(bec_points))
+
+  bec_grid <- aw_grid[st_within(aw_grid, bec_bbox) %>%
+                        lengths() > 0, ]
+
+  # Check and filter empty geometries
+  bec_grid <- bec_grid %>%
+    filter(!st_is_empty(st_geometry(.)))
+
+  if (nrow(bec_grid) == 0) return(NULL)
+
+  # Inverse Distance Weighting (IDW) interpolation
+  nn_model <- gstat(formula = Site_Index ~ 1, locations = bec_points,
+                    nmax = 3, set = list(idp = 0))
+
+  interp <- predict(nn_model, newdata = bec_grid)
+  interp$BEC <- bec_zone
+
+  return(interp)
+})
+
+nn_combined <- do.call(rbind, interpolated_results)
+
+nn_combined$x <- st_coordinates(nn_combined)[, 1]
+nn_combined$y <- st_coordinates(nn_combined)[, 2]
+nn_combined$pred <- nn_combined$var1.pred
+
+nn_combined <- nn_combined %>%
+  select(x, y, pred)
+
+aw_grid_rst <- rast(aw_grid, nrows = 100, ncols = 100)
+
+nn_si_pred <- terra::rasterize(nn_combined, aw_grid_rst, field = "pred", fun = "mean")
+
+plot(nn_si_pred)
+
+writeRaster(nn_si_pred, "D:/aw_ceca/aw_tipsy/aw_si_rast.tif", overwrite = TRUE)
+
+si_na <- aw_si[is.na(aw_si$Site_Index), ]
+
+si_na <- st_transform(si_na, crs = crs(nn_si_pred))
+
+aw_si_interp <- terra::extract(nn_si_pred, si_na, fun = mean, bind = TRUE)
+
+aw_si_interp_df <- as.data.frame(aw_si_interp) %>%
+  select(Feat_ID, mean) %>%
+  rename(Site_Index = mean) %>%
+  group_by(Feat_ID) %>%
+  summarise(Site_Index = mean(Site_Index, na.rm = TRUE))
+
+aw_tipsy_df <- st_drop_geometry(aw_tipsy_comp)
+
+aw_tipsy_df <- aw_tipsy_df %>%
+  left_join(aw_si_interp_df, by = "Feat_ID", suffix = c("", "_interp")) %>%
+  mutate(Site_Index = coalesce(Site_Index, Site_Index_interp)) %>%
+  select(-Site_Index_interp)
+
+aw_tipsy_comp <- st_sf(aw_tipsy_df, geometry = st_geometry(aw_tipsy_comp))
+
+st_write(aw_tipsy_comp, "D:/aw_ceca/aw_tipsy/aw_tipsy_comp.shp", append = FALSE)
+
+write.csv(st_drop_geometry(aw_tipsy_comp), "D:/aw_ceca/aw_tipsy/aw_tipsy_comp.csv")
+
+## Tipsy Batch processor didn't produce a complete excel file, so needed to export individual stands and merge them
+
+tipsy_dir <- "D:/aw_ceca/aw_tipsy/tipsy_output"
+
+tipsy_files <- list.files(tipsy_dir, pattern = "^stand_\\d+\\.csv$", full.names = TRUE)
+
+read_stand <- function(file) {
+  stand_id <- gsub(".*stand_(\\d+)\\.csv", "\\1", file) 
+  df <- fread(file) 
+  df$stand <- as.integer(stand_id)
+  return(df)
+}
+
+tipsy_output <- rbindlist(lapply(tipsy_files, read_stand), use.names = TRUE, fill = TRUE)
+
+write.csv(tipsy_output, "D:/aw_ceca/aw_tipsy/tipsy_output/tipsy_output_01.csv")
+```
+
+## Mountain Pine Beetle
+
+2009 was the first year with MPB data
+
+```{r}
+output_dir <- "D:/aw_ceca/aw_mpb"
+
+gpkg_files <- list.files("D:/aw_ceca/adams_vri", pattern = "aw_vri_\\d{4}\\.gpkg$", full.names = TRUE)
+
+target_years <- 2009:2023
+
+gpkg_years <- str_extract(basename(gpkg_files), "\\d{4}") %>% as.numeric()
+
+gpkg_files_filtered <- gpkg_files[gpkg_years %in% target_years]
+
+for (gpkg_path in gpkg_files_filtered) {
+  
+  year <- str_extract(basename(gpkg_path), "\\d{4}")
+  
+  vri_read <- st_read(gpkg_path)
+  
+  vri_wpb <- vri_read %>%
+    filter(grepl("^I\\d{2}", LINE_7B_DISTURBANCE_HISTORY))
+  
+  output_file <- file.path(output_dir, paste0("aw_mpb_", year, ".gpkg"))
+  
+  st_write(vri_wpb, output_file, driver = "GPKG", append = FALSE)
+  
+  print(paste("Processed year", year))
+}
+
+for (gpkg_path in gpkg_files) {
+  
+  year <- str_extract(basename(gpkg_path), "\\d{4}")
+  
+  vri_read <- st_read(gpkg_path)
+  
+  vri_wpb <- vri_read %>%
+    filter(grepl("^I\\d{2}", LINE_7B_DISTURBANCE_HISTORY))
+  
+  output_file <- file.path(output_dir, paste0("aw_mpb_", year, ".gpkg"))
+  
+  st_write(vri_wpb, output_file, driver = "GPKG", append = FALSE)
+  
+}
+
+years <- 2009:2023
+base_path <- "D:/adams_cumulative_disturbance/aw_wpb"
+
+aw_infest_list <- map(years, function(year) {
+file_path <- file.path(base_path, paste0("aw_wpb_", year, ".gpkg"))
+st_read(file_path)
+})
+
+aw_mpb <- bind_rows(aw_infest_list) %>%
+  distinct(FEATURE_ID, .keep_all = TRUE) %>%
+  select(- SE_ANNO_CAD_DATA) %>%
+  select(
+    Feature_ID = FEATURE_ID,
+    Year_est = LINE_7B_DISTURBANCE_HISTORY,
+    Dist_type = EARLIEST_NONLOGGING_DIST_TYPE,
+    Area = FEATURE_AREA_SQM, 
+    BEC = BEC_ZONE_CODE,
+    Spc_1 = SPECIES_CD_1,
+    Spc_1_comp = SPECIES_PCT_1,
+    Spc_2 = SPECIES_CD_2,
+    Spc_2_comp = SPECIES_PCT_2,
+    Spc_3 = SPECIES_CD_3,
+    Spc_3_comp = SPECIES_PCT_3,
+    Spc_4 = SPECIES_CD_4,
+    Spc_4_comp = SPECIES_PCT_4,
+    Pct_dead = STAND_PERCENTAGE_DEAD,
+    Stem_ha_l = VRI_LIVE_STEMS_PER_HA,
+    Stem_ha_d = VRI_DEAD_STEMS_PER_HA,
+    Site_index = SITE_INDEX
+    ) %>%
+  filter(if_any(c(6, 8, 10, 12), ~ . %in% c("PL", "PW", "PA", "PF"))) %>% 
+  mutate(Pct_live = (Stem_ha_l / (Stem_ha_l + Stem_ha_d)) * 100) %>% 
+  filter(Pct_live < 70)
+  
+breaks <- c(0, 5, 15, 25, 35, 45, 55, 65)
+
+labels <- c("0", "10", "20", "30", "40", "50", "60")
+
+aw_mpb <- aw_mpb %>%
+  mutate(pct_live_group = cut(Pct_live,
+                              breaks = c(-Inf, 5, 15, 25, 35, 45, 55, 65),
+                              labels = labels,
+                              right = TRUE, include.lowest = TRUE))
+
+aw_mpb_clean <- aw_mpb %>%
+  filter(!is.na(pct_live_group))
+
+aw_mpb_eca <- aw_mpb_clean %>%
+  mutate(area = st_area(geom)) %>% 
+  mutate(area = as.numeric(area)) %>%
+  mutate(Area = if_else(is.na(Area), area, Area)) %>% 
+  select(- area)
+
+st_write(aw_mpb_eca, "D:/adams_cumulative_disturbance/aw_wpb/aw_mpb_eca.shp", append = FALSE)
+
+aw_mpb_csv <- st_drop_geometry(aw_mpb_eca)
+
+write.csv(aw_mpb_csv, "D:/adams_cumulative_disturbance/aw_wpb/aw_mpb.csv")
+```
+
+## Roads
+
+```{r}
+library(mapview)
+
+aw_road_atlas <- st_read("D:/adams_cumulative_disturbance/aw_roads/DRA_DGTL_ROAD_ATLAS_MPAR_SP/DRA_MPAR_line.shp")
+
+aw_ften_roads <- st_read("D:/adams_cumulative_disturbance/aw_roads/FTEN_ROAD_SEGMENT_POLY_SVW/FRD_TSEG_polygon.shp")
+
+gdb_path <- "D:/adams_cumulative_disturbance/aw_roads/BC_CE_Integrated_Roads_2025/BC_CE_Integrated_Roads_2025.gdb"
+
+st_layers(gdb_path)
+gdb_layer <- "integrated_roads_2025"
+
+aw_road_gdb  <- st_read(
+  dsn       = gdb_path,
+  layer     = gdb_layer,
+  wkt_filter = st_as_text(st_geometry(adams_gauged_catchment))
+)
+
+mapview(aw_road_gdb)
+
+aw_roads <- aw_road_gdb %>% 
+  select(
+    Rd_ID = INTEGRATED_ROADS_ID,
+    Rd_name = DRA_ROAD_NAME_FULL,
+    Rd_type = FTEN_FILE_TYPE_DESCRIPTION,
+    Rd_status = FTEN_LIFE_CYCLE_STATUS_CODE,
+    Rd_length = Shape_Length,
+    Rd_class = DRA_ROAD_CLASS,
+    Rd_surface = DRA_ROAD_SURFACE,
+    Rd_lanes = DRA_NUMBER_OF_LANES,
+    Rd_retire = FTEN_RETIREMENT_DATE,
+    DRA_dc_dat = DRA_DATA_CAPTURE_DATE,
+    Award_date = FTEN_AWARD_DATE,
+    Ref_year = RESULTS_REFERENCE_YEAR
+  )
+
+mapview(aw_roads)
+
+st_write(aw_roads, "D:/adams_tipsy/aw_roads.shp")
+write_csv(aw_roads, "D:/adams_tipsy/aw_roads.csv")
+```
